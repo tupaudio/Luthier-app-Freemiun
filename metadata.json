@@ -1,0 +1,10 @@
+{
+  "name": "Luthier de Bolso Premium",
+  "description": "Especificação técnica e protótipo interativo de manutenção e afinação de instrumentos de corda (Guitarra, Violão e Baixo).",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
