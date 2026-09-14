@@ -11,6 +11,7 @@ import MaintenanceGuide from './components/MaintenanceGuide';
 import TechnicalSpecs from './components/TechnicalSpecs';
 import MyInstruments from './components/MyInstruments';
 import PlayStorePaywallModal from './components/PlayStorePaywallModal';
+import { checkProStatus } from './services/purchaseService';
 
 export default function App() {
   // Theme State: 'dark' | 'light'
@@ -24,6 +25,15 @@ export default function App() {
     const saved = localStorage.getItem('luthier_user_plan');
     return (saved === 'pro' || saved === 'free') ? saved : 'free';
   });
+
+  // Check Google Play Billing entitlement on startup
+  useEffect(() => {
+    checkProStatus().then(isPro => {
+      if (isPro) {
+        setPlan('pro');
+      }
+    });
+  }, []);
 
   // Paywall Modal State
   const [showPaywallModal, setShowPaywallModal] = useState<boolean>(false);
@@ -63,9 +73,6 @@ export default function App() {
   const togglePlan = () => {
     if (plan === 'free') {
       setShowPaywallModal(true);
-    } else {
-      // Toggle back to free for quick testing or downgrade
-      setPlan('free');
     }
   };
 
@@ -136,24 +143,33 @@ export default function App() {
         {/* Header Right Actions: Plan Toggle, Theme Toggle & Specs */}
         <div className="flex items-center gap-2">
           
-          {/* Plan Badge & Toggle Button */}
-          <button
-            onClick={togglePlan}
-            className={`px-2.5 py-1.5 rounded-xl border text-xs font-mono font-bold flex items-center gap-1.5 transition-all shadow-sm ${
-              plan === 'pro'
-                ? 'bg-amber-500/15 border-amber-500/40 text-amber-400 hover:bg-amber-500/25'
-                : theme === 'dark'
-                  ? 'bg-stone-900 border-stone-800 text-stone-400 hover:text-stone-200'
-                  : 'bg-stone-100 border-stone-200 text-stone-700 hover:bg-stone-200'
-            }`}
-            title="Alternar entre Versão Gratuita e Versão Paga (PRO)"
-          >
-            <Sparkles className={`w-3.5 h-3.5 ${plan === 'pro' ? 'text-amber-400 animate-pulse' : 'text-stone-400'}`} />
-            <span>{plan === 'pro' ? 'Plano PRO' : 'Gratuito'}</span>
-            <span className="text-[9px] px-1 rounded bg-stone-800/80 text-stone-300 font-sans font-normal border border-stone-700/60 hidden sm:inline">
-              Mudar
-            </span>
-          </button>
+          {/* Plan Badge */}
+          {plan === 'free' ? (
+            <button
+              onClick={togglePlan}
+              className={`px-3 py-1.5 rounded-xl border text-xs font-mono font-bold flex items-center gap-1.5 transition-all shadow-sm ${
+                theme === 'dark'
+                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
+                  : 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100'
+              }`}
+              title="Desbloquear recursos PRO com Google Play"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+              <span>Seja PRO</span>
+            </button>
+          ) : (
+            <div
+              className={`px-3 py-1.5 rounded-xl border text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm ${
+                theme === 'dark'
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-400'
+                  : 'bg-amber-100 border-amber-300 text-amber-800'
+              }`}
+              title="Assinatura PRO Ativa"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
+              <span>Plano PRO</span>
+            </div>
+          )}
 
           {/* Theme Toggle Button */}
           <button

@@ -325,7 +325,7 @@ export default function DiagnosticWizard({ onRedirectToSection, theme = 'dark', 
                   type="button"
                   onClick={() => triggerFreeNotification()}
                   className={`underline hover:text-amber-400 transition-colors ${isLight ? 'text-stone-600' : 'text-stone-400'}`}
-                  title="Simular disparo de lembrete"
+                  title="Disparar notificação de teste"
                 >
                   Testar Notificação
                 </button>

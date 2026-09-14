@@ -403,7 +403,7 @@ export default function MyInstruments({ theme, plan = 'free', onTogglePlan }: My
                 className="px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 transition-all active:scale-95 flex-shrink-0"
               >
                 <Sparkles className="w-4 h-4" />
-                <span>Ativar Versão PRO (Simular VIP)</span>
+                <span>Desbloquear Versão PRO</span>
               </button>
             )}
           </div>
