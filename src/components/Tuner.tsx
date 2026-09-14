@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Square, Mic, MicOff, Volume2, Settings2, Info } from 'lucide-react';
+import { Play, Square, Mic, MicOff, Volume2, Settings2, Info, Infinity as InfinityIcon, Clock } from 'lucide-react';
 import { INSTRUMENTS, InstrumentType, InstrumentString, InstrumentDefinition } from '../types';
 
 export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) {
@@ -19,10 +19,22 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
   const [playingStringIndex, setPlayingStringIndex] = useState<number | null>(null);
   const [soundTimbre, setSoundTimbre] = useState<'piano' | 'diapasao'>('piano');
   
+  // Som Contínuo: Ligado (infinito até clicar em Parar) / Desligado (5 segundos no mesmo volume)
+  const [isContinuousSound, setIsContinuousSound] = useState<boolean>(() => {
+    const saved = localStorage.getItem('luthier_continuous_sound');
+    return saved === 'true';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('luthier_continuous_sound', String(isContinuousSound));
+  }, [isContinuousSound]);
+
   const isLight = theme === 'light';
   
   const audioContextRef = useRef<AudioContext | null>(null);
-  const activeOscillatorsRef = useRef<any[]>([]);
+  const activeOscillatorsRef = useRef<OscillatorNode[]>([]);
+  const masterGainRef = useRef<GainNode | null>(null);
+  const stopTimerRef = useRef<any>(null);
   const animationFrameRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -33,26 +45,140 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
   const activeTuning = instrument.tunings.find(t => t.id === selectedTuningId) || instrument.tunings[0];
   const activeStrings = activeTuning ? activeTuning.strings : instrument.strings;
 
-  // Stop any active synthesized sounds
-  const stopSynthesizer = () => {
-    activeOscillatorsRef.current.forEach((osc) => {
-      try { osc.stop(); } catch (e) {}
-    });
+  // Interrompe qualquer som sintetizado ativo de forma limpa (sem pops digitais)
+  const stopSynthesizer = (smooth = true) => {
+    if (stopTimerRef.current) {
+      clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
+
+    if (smooth && masterGainRef.current && audioContextRef.current) {
+      try {
+        const ctx = audioContextRef.current;
+        const now = ctx.currentTime;
+        masterGainRef.current.gain.cancelScheduledValues(now);
+        masterGainRef.current.gain.setValueAtTime(masterGainRef.current.gain.value, now);
+        masterGainRef.current.gain.linearRampToValueAtTime(0.0001, now + 0.04);
+
+        const oscs = [...activeOscillatorsRef.current];
+        setTimeout(() => {
+          oscs.forEach(osc => {
+            try {
+              osc.stop();
+              osc.disconnect();
+            } catch (e) {}
+          });
+        }, 50);
+      } catch (e) {
+        activeOscillatorsRef.current.forEach(osc => {
+          try {
+            osc.stop();
+            osc.disconnect();
+          } catch (err) {}
+        });
+      }
+    } else {
+      activeOscillatorsRef.current.forEach(osc => {
+        try {
+          osc.stop();
+          osc.disconnect();
+        } catch (e) {}
+      });
+    }
+
     activeOscillatorsRef.current = [];
+    masterGainRef.current = null;
     setPlayingStringIndex(null);
   };
 
-  // Play reference tones using the selected physical timbre emulation
-  const playReferenceTone = (frequency: number, index: number, overrideTimbre?: 'piano' | 'diapasao') => {
-    stopSynthesizer();
+  // Alterna o modo de som contínuo
+  const toggleContinuousSound = () => {
+    setIsContinuousSound(prev => {
+      const next = !prev;
+      if (next) {
+        // Se ativou o contínuo e está tocando, cancela o timer de 5s para que não pare sozinho
+        if (stopTimerRef.current) {
+          clearTimeout(stopTimerRef.current);
+          stopTimerRef.current = null;
+        }
+      } else {
+        // Se desativou o contínuo e está tocando, programa a parada para 4s a partir de agora (3s estável + 1s fade-out)
+        if (playingStringIndex !== null) {
+          if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+          stopTimerRef.current = setTimeout(() => {
+            stopSynthesizer(true);
+          }, 4000);
+        }
+      }
+      return next;
+    });
+  };
+
+  // Reproduz notas de referência com som límpido, sem estourar em frequências acima de 140Hz
+  const playReferenceTone = async (frequency: number, index: number, overrideTimbre?: 'piano' | 'diapasao') => {
+    // Se clicar na mesma corda que já está tocando, silencia
+    if (playingStringIndex === index && !overrideTimbre) {
+      stopSynthesizer(true);
+      return;
+    }
+
+    stopSynthesizer(false);
     setPlayingStringIndex(index);
 
     const activeTimbre = overrideTimbre || soundTimbre;
 
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      const ctx = new AudioContextClass();
-      audioContextRef.current = ctx;
+      let ctx = audioContextRef.current;
+      if (!ctx || ctx.state === 'closed') {
+        ctx = new AudioContextClass();
+        audioContextRef.current = ctx;
+      }
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+
+      const now = ctx.currentTime;
+
+      // Compressor de dinâmica de proteção (Limiter) para impedir 100% qualquer distorção ou clipagem digital
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.setValueAtTime(-4, now);
+      compressor.knee.setValueAtTime(6, now);
+      compressor.ratio.setValueAtTime(8, now);
+      compressor.attack.setValueAtTime(0.003, now);
+      compressor.release.setValueAtTime(0.1, now);
+      compressor.connect(ctx.destination);
+
+      const masterGain = ctx.createGain();
+      masterGainRef.current = masterGain;
+      masterGain.connect(compressor);
+
+      // Fator de compensação de graves calibrado com headroom amplo para NUNCA saturar acima de 140Hz
+      const bassFactor = frequency < 90 ? 1.2 : (frequency < 140 ? 1.08 : 1.0);
+      const targetMasterVolume = 0.38 * bassFactor;
+
+      // Ataque ultra suave de 25ms para evitar qualquer clique/pop de início
+      masterGain.gain.setValueAtTime(0.0001, now);
+      masterGain.gain.linearRampToValueAtTime(targetMasterVolume, now + 0.025);
+
+      const isContinuous = isContinuousSound;
+      // Duração: 3 segundos no mesmo volume constante + 1 segundo de fade out suave = 4 segundos totais
+      const steadyDuration = 3.0;
+      const fadeDuration = 1.0;
+      const totalDuration = steadyDuration + fadeDuration;
+
+      if (!isContinuous) {
+        // Mantém EXATAMENTE o mesmo volume por 3 segundos
+        masterGain.gain.setValueAtTime(targetMasterVolume, now + steadyDuration);
+        // Fade out suave durante 1 segundo inteiro até silenciar
+        masterGain.gain.linearRampToValueAtTime(0.0001, now + totalDuration);
+
+        stopTimerRef.current = setTimeout(() => {
+          if (playingStringIndex === index) {
+            stopSynthesizer(true);
+          }
+        }, totalDuration * 1000);
+      }
 
       const osc1 = ctx.createOscillator();
       const osc2 = ctx.createOscillator();
@@ -63,144 +189,64 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
       const gain2 = ctx.createGain();
       const gain3 = ctx.createGain();
       const gain4 = ctx.createGain();
-      const masterGain = ctx.createGain();
 
-      // Compensação Dinâmica de Graves (Curva Fletcher-Munson simplificada para equalização de fones/monitores)
-      const isBass = frequency < 85; // Notas de Contra-baixo (ex: E1=41.2Hz, A1=55Hz, D2=73.4Hz)
-      const isLowGuitar = frequency >= 85 && frequency < 150; // Notas graves de guitarra
+      const oscs: OscillatorNode[] = [osc1];
 
-      // Fator de boost para compensar perda natural de baixa frequência
-      const bassBoostFactor = isBass ? 2.1 : (isLowGuitar ? 1.45 : 1.05);
-
-      let type1: OscillatorType = 'sine';
-      let type2: OscillatorType = 'sine';
-      let type3: OscillatorType = 'sine';
-      let type4: OscillatorType = 'sine';
-
-      let freq1 = frequency;
-      let freq2 = frequency * 2;
-      let freq3 = frequency * 3;
-      let freq4 = frequency * 4;
-
-      let vol1 = 0.0;
-      let vol2 = 0.0;
-      let vol3 = 0.0;
-      let vol4 = 0.0;
-
-      const duration = 7.5; // Sustentação de 7.5 segundos
-      const now = ctx.currentTime;
-
-      if (activeTimbre === 'piano') {
-        // TIMBRE DE PIANO: Síntese aditiva com leve desafinação natural e ataque percussivo de martelo de feltro
-        type1 = 'sine';       // Fundamental (Corpo vibrante)
-        type2 = 'sine';       // 2º Harmônico (Definição de pitch)
-        type3 = 'sine';       // 3º Harmônico (Ressonância simpática)
-        type4 = 'triangle';   // Transiente de ataque metálico/madeira do martelo
-
-        // Leve desafinação harmônica inerente a pianos acústicos reais (chorus/unison natural)
-        freq1 = frequency;
-        freq2 = frequency * 2.0008;
-        freq3 = frequency * 3.0015;
-        freq4 = frequency * 4.0025;
-
-        if (isBass) {
-          vol1 = 0.55; 
-          vol2 = 0.45; 
-          vol3 = 0.20; 
-          vol4 = 0.22; 
-        } else if (isLowGuitar) {
-          vol1 = 0.58;
-          vol2 = 0.35;
-          vol3 = 0.15;
-          vol4 = 0.14;
-        } else {
-          vol1 = 0.65;
-          vol2 = 0.25;
-          vol3 = 0.08;
-          vol4 = 0.08;
-        }
-
-        // --- Configuração dos Envelopes ADSR para Piano Natural ---
-        // Fundamental: Rampa de ataque ultra rápida de 15ms (sem pop/clique digital) e sustentação longa
-        osc1.type = type1;
-        osc1.frequency.setValueAtTime(freq1, now);
+      if (activeTimbre === 'diapasao') {
+        // TIMBRE DE DIAPASÃO: Onda senoidal pura de referência, cristalina e musical
+        osc1.type = 'sine';
+        osc1.frequency.setValueAtTime(frequency, now);
         osc1.connect(gain1);
         gain1.connect(masterGain);
-        gain1.gain.setValueAtTime(0.0001, now);
-        gain1.gain.exponentialRampToValueAtTime(vol1, now + 0.015);
-        gain1.gain.exponentialRampToValueAtTime(0.001, now + duration);
+        gain1.gain.setValueAtTime(0.75, now);
+      } else {
+        // TIMBRE DE PIANO: Síntese aditiva natural com harmônicos controlados
+        oscs.push(osc2, osc3, osc4);
 
-        // Oitava (2º Harmônico): Ataque de 12ms e decaimento um pouco mais rápido
-        osc2.type = type2;
-        osc2.frequency.setValueAtTime(freq2, now);
+        osc1.type = 'sine';
+        osc1.frequency.setValueAtTime(frequency, now);
+        osc1.connect(gain1);
+        gain1.connect(masterGain);
+
+        osc2.type = 'sine';
+        osc2.frequency.setValueAtTime(frequency * 2.0006, now); // 2º harmônico (oitava sutil)
         osc2.connect(gain2);
         gain2.connect(masterGain);
-        gain2.gain.setValueAtTime(0.0001, now);
-        gain2.gain.exponentialRampToValueAtTime(vol2, now + 0.012);
-        gain2.gain.exponentialRampToValueAtTime(0.001, now + duration - 1.5);
 
-        // Quinta (3º Harmônico): Ataque de 18ms e decaimento médio
-        osc3.type = type3;
-        osc3.frequency.setValueAtTime(freq3, now);
+        osc3.type = 'sine';
+        osc3.frequency.setValueAtTime(frequency * 3.0012, now); // 3º harmônico (quinta sutil)
         osc3.connect(gain3);
         gain3.connect(masterGain);
-        gain3.gain.setValueAtTime(0.0001, now);
-        gain3.gain.exponentialRampToValueAtTime(vol3, now + 0.018);
-        gain3.gain.exponentialRampToValueAtTime(0.001, now + duration - 3.2);
 
-        // Martelada (Ataque transiente de alta frequência): Ataque imediato em 4ms e decaimento percussivo ultra rápido
-        osc4.type = type4;
-        osc4.frequency.setValueAtTime(freq4, now);
+        osc4.type = 'sine';
+        osc4.frequency.setValueAtTime(frequency * 4.0018, now); // Transiente de ataque de martelo
         osc4.connect(gain4);
         gain4.connect(masterGain);
-        gain4.gain.setValueAtTime(0.0001, now);
-        gain4.gain.exponentialRampToValueAtTime(vol4, now + 0.004);
-        gain4.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
-      } 
-      else {
-        // TIMBRE DE DIAPASÃO: Onda senoidal pura de laboratório, com ataque super suave e linear (tipo sino)
-        type1 = 'sine';
-        freq1 = frequency;
-        vol1 = 0.85;
 
-        osc1.type = type1;
-        osc1.frequency.setValueAtTime(freq1, now);
-        osc1.connect(gain1);
-        gain1.connect(masterGain);
-        gain1.gain.setValueAtTime(0.0001, now);
-        gain1.gain.exponentialRampToValueAtTime(vol1, now + 0.08); // Ataque suave de 80ms
-        gain1.gain.exponentialRampToValueAtTime(0.001, now + duration);
+        // Calibração harmônica: notas agudas (>= 140Hz) com harmônicos reduzidos para som encorpado e aveludado
+        const isHighFreq = frequency >= 140;
+        const v1 = isHighFreq ? 0.62 : 0.54;
+        const v2 = isHighFreq ? 0.16 : 0.24;
+        const v3 = isHighFreq ? 0.04 : 0.08;
+        const v4 = 0.05; // Martelo inicial percussivo
 
-        // Desliga os outros canais de forma limpa
-        gain2.gain.setValueAtTime(0.0001, now);
-        gain3.gain.setValueAtTime(0.0001, now);
-        gain4.gain.setValueAtTime(0.0001, now);
+        gain1.gain.setValueAtTime(v1, now);
+        gain2.gain.setValueAtTime(v2, now);
+        gain3.gain.setValueAtTime(v3, now);
+
+        // Transiente de martelo suave que decai naturalmente nos primeiros 60ms
+        gain4.gain.setValueAtTime(v4, now);
+        gain4.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
       }
 
-      // Master Gain aplicando o equalizador de compensação dinâmica de graves
-      masterGain.gain.setValueAtTime(1.2 * bassBoostFactor, now);
-      masterGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
-
-      masterGain.connect(ctx.destination);
-
-      osc1.start(now);
-      osc2.start(now);
-      osc3.start(now);
-      osc4.start(now);
-
-      osc1.stop(now + duration);
-      osc2.stop(now + duration);
-      osc3.stop(now + duration);
-      osc4.stop(now + duration);
-
-      activeOscillatorsRef.current = [osc1, osc2, osc3, osc4];
-
-      // Reset do índice de execução ao término
-      setTimeout(() => {
-        if (playingStringIndex === index) {
-          setPlayingStringIndex(null);
+      oscs.forEach(osc => {
+        osc.start(now);
+        if (!isContinuous) {
+          osc.stop(now + totalDuration + 0.05);
         }
-      }, duration * 1000);
+      });
+
+      activeOscillatorsRef.current = oscs;
     } catch (e) {
       console.error("Erro ao iniciar áudio de referência:", e);
     }
@@ -667,59 +713,92 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
           <span className={`text-xxs font-mono uppercase tracking-wider font-bold flex items-center gap-1 ${
             isLight ? 'text-stone-600' : 'text-stone-400'
           }`}>
-            <Volume2 className="w-3.5 h-3.5" /> Notas de Referência ({activeTuning?.name || instrument.name})
+            <Volume2 className="w-3.5 h-3.5 text-amber-500" /> Notas de Referência ({activeTuning?.name || instrument.name})
           </span>
-          {playingStringIndex !== null && (
-            <button 
-              onClick={stopSynthesizer}
-              className={`text-xxs font-mono flex items-center gap-1 border rounded px-1.5 py-0.5 ${
-                isLight ? 'text-amber-700 border-amber-300 bg-amber-50 hover:bg-amber-100' : 'text-amber-500 border-amber-500/30 hover:text-amber-400'
-              }`}
-            >
-              <Square className="w-2.5 h-2.5 fill-current" /> Parar Som
-            </button>
-          )}
         </div>
 
-        {/* Chave Seletora de Timbre */}
-        <div className={`mb-3 p-1.5 rounded-xl border flex items-center justify-between gap-2 max-w-sm mx-auto ${
+        {/* Controles de Reprodução: Som Contínuo & Timbre */}
+        <div className={`mb-3 p-2 rounded-xl border flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 max-w-md mx-auto ${
           isLight ? 'bg-stone-50 border-stone-200' : 'bg-stone-950 border-stone-800/80'
         }`}>
-          <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider pl-1.5 ${
-            isLight ? 'text-stone-600' : 'text-stone-400'
-          }`}>Timbre:</span>
-          <div className={`flex p-0.5 rounded-lg border ${
-            isLight ? 'bg-white border-stone-200' : 'bg-stone-900 border-stone-850'
-          }`}>
-            {[
-              { id: 'piano', label: 'Piano 🎹' },
-              { id: 'diapasao', label: 'Diapasão 🔔' }
-            ].map((option) => (
-              <button
-                key={option.id}
-                onClick={() => {
-                  setSoundTimbre(option.id as any);
-                  if (playingStringIndex !== null) {
-                    const activeStr = activeStrings[playingStringIndex];
-                    if (activeStr) {
-                      playReferenceTone(activeStr.frequency, playingStringIndex, option.id as any);
+          {/* Chave de Som Contínuo Ligado / Desligado */}
+          <div className="flex items-center justify-between sm:justify-start gap-2">
+            <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider pl-1 ${
+              isLight ? 'text-stone-600' : 'text-stone-400'
+            }`}>
+              Som Contínuo:
+            </span>
+            <button
+              onClick={toggleContinuousSound}
+              className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold flex items-center gap-1.5 transition-all border shadow-sm ${
+                isContinuousSound
+                  ? isLight 
+                    ? 'bg-amber-600 border-amber-600 text-white shadow-amber-600/10' 
+                    : 'bg-amber-500 border-amber-500 text-stone-950 shadow-amber-500/20'
+                  : isLight 
+                    ? 'bg-white border-stone-300 text-stone-700 hover:bg-stone-100' 
+                    : 'bg-stone-900 border-stone-750 text-stone-300 hover:text-white hover:bg-stone-850'
+              }`}
+              title={
+                isContinuousSound 
+                  ? "Som contínuo LIGADO: a nota toca sem parar até você clicar em Parar na corda" 
+                  : "Som contínuo DESLIGADO: a nota toca 3 segundos no mesmo volume + 1 segundo de fade out"
+              }
+            >
+              {isContinuousSound ? (
+                <>
+                  <InfinityIcon className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <span>Ligado</span>
+                </>
+              ) : (
+                <>
+                  <Clock className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <span>Desligado (3s + 1s)</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Seletor de Timbre */}
+          <div className="flex items-center justify-between sm:justify-end gap-1.5 pt-1.5 sm:pt-0 border-t sm:border-t-0 border-stone-200/80 dark:border-stone-800/80">
+            <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider pl-1 sm:hidden ${
+              isLight ? 'text-stone-600' : 'text-stone-400'
+            }`}>
+              Timbre:
+            </span>
+            <div className={`flex p-0.5 rounded-lg border ${
+              isLight ? 'bg-white border-stone-200' : 'bg-stone-900 border-stone-850'
+            }`}>
+              {[
+                { id: 'piano', label: 'Piano 🎹' },
+                { id: 'diapasao', label: 'Diapasão 🔔' }
+              ].map((option) => (
+                <button
+                  key={option.id}
+                  onClick={() => {
+                    setSoundTimbre(option.id as any);
+                    if (playingStringIndex !== null) {
+                      const activeStr = activeStrings[playingStringIndex];
+                      if (activeStr) {
+                        playReferenceTone(activeStr.frequency, playingStringIndex, option.id as any);
+                      }
                     }
-                  }
-                }}
-                className={`px-2.5 py-1 rounded-md text-[10px] font-mono font-bold transition-all ${
-                  soundTimbre === option.id
-                    ? isLight ? 'bg-amber-600 text-white shadow-sm' : 'bg-amber-500 text-stone-950 shadow-md shadow-amber-500/10'
-                    : isLight ? 'text-stone-600 hover:text-stone-900' : 'text-stone-400 hover:text-stone-200'
-                }`}
-              >
-                {option.label}
-              </button>
-            ))}
+                  }}
+                  className={`px-2.5 py-1 rounded-md text-[10px] font-mono font-bold transition-all ${
+                    soundTimbre === option.id
+                      ? isLight ? 'bg-amber-600 text-white shadow-sm' : 'bg-amber-500 text-stone-950 shadow-md shadow-amber-500/10'
+                      : isLight ? 'text-stone-600 hover:text-stone-900' : 'text-stone-400 hover:text-stone-200'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
         {/* Fretboard/Peg visual representation */}
-        <div className="flex flex-col gap-2 max-w-sm mx-auto">
+        <div className="flex flex-col gap-2 max-w-md mx-auto">
           {activeStrings.map((str, idx) => {
             const isClosest = isMicMode && activeStringIndex === idx;
             const isPlaying = playingStringIndex === idx;
@@ -730,11 +809,12 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
                 onClick={() => playReferenceTone(str.frequency, idx)}
                 className={`w-full py-2.5 px-4 rounded-xl border flex items-center justify-between transition-all duration-200 relative overflow-hidden group ${
                   isPlaying 
-                    ? isLight ? 'bg-amber-50 border-amber-400 text-amber-900 shadow-sm' : 'bg-amber-500/10 border-amber-500/80 text-amber-400 shadow-md' 
+                    ? isLight ? 'bg-amber-50 border-amber-500 text-amber-900 shadow-sm ring-1 ring-amber-500/50' : 'bg-amber-500/15 border-amber-500 text-amber-300 shadow-md ring-1 ring-amber-500/40' 
                     : isClosest 
                       ? isLight ? 'bg-stone-100 border-amber-400 text-amber-800' : 'bg-stone-800 border-amber-500/40 text-amber-500' 
                       : isLight ? 'bg-white border-stone-200 text-stone-800 hover:border-amber-300 hover:bg-stone-50 shadow-sm' : 'bg-stone-900 border-stone-800 text-stone-300 hover:border-stone-750 hover:bg-stone-850'
                 }`}
+                title={isPlaying ? "Clique para parar o som" : `Tocar ${str.note}${str.octave} (${str.frequency} Hz)`}
               >
                 {/* Horizontal String Line under peg */}
                 <div 
@@ -768,10 +848,26 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
 
                 <div className="flex items-center gap-2 relative z-10 font-mono text-xxs shrink-0">
                   <span className={isLight ? 'text-stone-500' : 'text-stone-400'}>{str.frequency} Hz</span>
-                  <div className={`p-1.5 rounded-lg ${
-                    isPlaying ? isLight ? 'bg-amber-600 text-white' : 'bg-amber-500 text-stone-950' : isLight ? 'bg-stone-100 text-stone-600 group-hover:bg-amber-100 group-hover:text-amber-800' : 'bg-stone-800 text-stone-400 group-hover:bg-stone-750'
+                  <div className={`px-2 py-1 rounded-lg flex items-center gap-1 font-bold transition-all ${
+                    isPlaying 
+                      ? isLight 
+                        ? 'bg-red-600 text-white shadow-sm' 
+                        : 'bg-red-500 text-stone-950 shadow-sm' 
+                      : isLight 
+                        ? 'bg-stone-100 text-stone-600 group-hover:bg-amber-100 group-hover:text-amber-800' 
+                        : 'bg-stone-800 text-stone-400 group-hover:bg-stone-750'
                   }`}>
-                    <Play className="w-3 h-3 fill-current" />
+                    {isPlaying ? (
+                      <>
+                        <Square className="w-2.5 h-2.5 fill-current" />
+                        <span>Parar</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play className="w-2.5 h-2.5 fill-current" />
+                        <span>Tocar</span>
+                      </>
+                    )}
                   </div>
                 </div>
               </button>

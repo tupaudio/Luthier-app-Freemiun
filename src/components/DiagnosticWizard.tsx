@@ -612,27 +612,37 @@ export default function DiagnosticWizard({ onRedirectToSection, theme = 'dark', 
         {step === 5 && result && (
           <div className="space-y-4 max-w-lg mx-auto w-full py-2">
             {/* Severity and Title */}
-            <div className={`p-4.5 rounded-2xl border relative overflow-hidden shadow-sm ${
+            <div className={`p-4.5 rounded-2xl border shadow-sm ${
               isLight ? 'bg-white border-stone-200' : 'bg-stone-900 border-stone-800'
             }`}>
-              <div className="absolute top-0 right-0 p-3">
+              {/* Gravity badge in separate block above title */}
+              <div className="mb-3">
                 {result.severity === 'high' ? (
-                  <span className={`px-2 py-0.5 rounded border text-[9px] font-mono uppercase font-bold tracking-wider ${
-                    isLight ? 'bg-red-50 text-red-700 border-red-200' : 'bg-red-950 text-red-400 border-red-900/50'
-                  }`}>Gravidade Alta</span>
+                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-mono uppercase font-bold tracking-wider ${
+                    isLight ? 'bg-red-50 text-red-700 border-red-200' : 'bg-red-950/80 text-red-400 border-red-900/60'
+                  }`}>
+                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                    Gravidade Alta
+                  </span>
                 ) : result.severity === 'medium' ? (
-                  <span className={`px-2 py-0.5 rounded border text-[9px] font-mono uppercase font-bold tracking-wider ${
-                    isLight ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-amber-950 text-amber-400 border-amber-900/50'
-                  }`}>Gravidade Média</span>
+                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-mono uppercase font-bold tracking-wider ${
+                    isLight ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-amber-950/80 text-amber-400 border-amber-900/60'
+                  }`}>
+                    <span className="w-2 h-2 rounded-full bg-amber-500" />
+                    Gravidade Média
+                  </span>
                 ) : (
-                  <span className={`px-2 py-0.5 rounded border text-[9px] font-mono uppercase font-bold tracking-wider ${
-                    isLight ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-blue-950 text-blue-400 border-blue-900/50'
-                  }`}>Informativo</span>
+                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-mono uppercase font-bold tracking-wider ${
+                    isLight ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-blue-950/80 text-blue-400 border-blue-900/60'
+                  }`}>
+                    <span className="w-2 h-2 rounded-full bg-blue-500" />
+                    Gravidade Baixa
+                  </span>
                 )}
               </div>
               
-              <div className="flex items-center gap-2 mb-2">
-                <ShieldAlert className={`w-5 h-5 ${
+              <div className="flex items-start gap-2 mb-2">
+                <ShieldAlert className={`w-5 h-5 mt-0.5 flex-shrink-0 ${
                   result.severity === 'high' ? 'text-red-500' : isLight ? 'text-amber-600' : 'text-amber-400'
                 }`} />
                 <h3 className={`text-base font-bold font-display ${isLight ? 'text-stone-900' : 'text-stone-100'}`}>
