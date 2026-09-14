@@ -28,6 +28,26 @@ export default function App() {
   // Paywall Modal State
   const [showPaywallModal, setShowPaywallModal] = useState<boolean>(false);
 
+  // Initial App Loading Splash State
+  const [appLoading, setAppLoading] = useState<boolean>(true);
+  const [splashFading, setSplashFading] = useState<boolean>(false);
+
+  useEffect(() => {
+    // 950ms display + 350ms fade-out = ~1.3s total sleek native-feeling splash
+    const fadeTimer = setTimeout(() => {
+      setSplashFading(true);
+    }, 950);
+
+    const endTimer = setTimeout(() => {
+      setAppLoading(false);
+    }, 1300);
+
+    return () => {
+      clearTimeout(fadeTimer);
+      clearTimeout(endTimer);
+    };
+  }, []);
+
   useEffect(() => {
     localStorage.setItem('luthier_app_theme', theme);
   }, [theme]);
@@ -283,6 +303,49 @@ export default function App() {
         theme={theme}
         currentPlan={plan}
       />
+
+      {/* Animated App Loading Splash Screen */}
+      {appLoading && (
+        <div 
+          onClick={() => setAppLoading(false)}
+          className={`fixed inset-0 z-50 flex flex-col items-center justify-center transition-opacity duration-300 cursor-pointer select-none ${
+            splashFading ? 'opacity-0 pointer-events-none' : 'opacity-100'
+          } ${
+            theme === 'dark' ? 'bg-[#0c0a09] text-stone-100' : 'bg-[#FAF8F5] text-stone-900'
+          }`}
+          title="Toque para pular"
+        >
+          <div className="flex flex-col items-center max-w-xs text-center px-6">
+            {/* Animated Logo Icon with Golden Glow */}
+            <div className="relative mb-6">
+              <div className="absolute -inset-4 bg-amber-500/25 rounded-3xl blur-2xl animate-pulse" />
+              <img 
+                src="/icon.png" 
+                alt="Luthier de Bolso" 
+                className="w-24 h-24 rounded-3xl shadow-2xl relative z-10 border border-amber-500/30 animate-bounce-subtle object-cover"
+              />
+            </div>
+
+            {/* App Title & Tupã Audio Badge */}
+            <h1 className="text-2xl font-black font-display tracking-tight mb-1.5">
+              Luthier de Bolso
+            </h1>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-500 font-mono text-xs font-bold uppercase tracking-wider mb-6">
+              <Sparkles className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
+              <span>por Tupã Áudio</span>
+            </div>
+
+            {/* Animated Loading Bar */}
+            <div className="w-48 h-1.5 bg-stone-800/80 rounded-full overflow-hidden relative shadow-inner mb-3">
+              <div className="h-full bg-gradient-to-r from-amber-600 via-amber-400 to-amber-500 rounded-full w-full animate-loading-bar" />
+            </div>
+
+            <p className="text-[11px] text-stone-400 font-mono tracking-tight">
+              Calibrando bancada digital...
+            </p>
+          </div>
+        </div>
+      )}
 
     </div>
   );

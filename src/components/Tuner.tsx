@@ -32,9 +32,15 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
   const isLight = theme === 'light';
   
   const audioContextRef = useRef<AudioContext | null>(null);
-  const activeOscillatorsRef = useRef<OscillatorNode[]>([]);
-  const masterGainRef = useRef<GainNode | null>(null);
-  const stopTimerRef = useRef<any>(null);
+  const masterBusRef = useRef<GainNode | null>(null);
+  const masterLimiterRef = useRef<DynamicsCompressorNode | null>(null);
+  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const currentVoiceRef = useRef<{
+    osc: OscillatorNode;
+    gain: GainNode;
+    filter?: BiquadFilterNode;
+    timeoutId?: any;
+  } | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -45,49 +51,93 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
   const activeTuning = instrument.tunings.find(t => t.id === selectedTuningId) || instrument.tunings[0];
   const activeStrings = activeTuning ? activeTuning.strings : instrument.strings;
 
-  // Interrompe qualquer som sintetizado ativo de forma limpa (sem pops digitais)
+  // Inicializador / Gerenciador do motor de áudio persistente com Limiter Anti-Clipping
+  const getOrCreateAudioEngine = async (): Promise<{ ctx: AudioContext; bus: GainNode }> => {
+    let ctx = audioContextRef.current;
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!ctx || ctx.state === 'closed') {
+      ctx = new AudioContextClass({ latencyHint: 'interactive' });
+      audioContextRef.current = ctx;
+
+      // Limiter master de pico transparente com release suave:
+      // Evita o efeito de "chatter" / chiado em notas graves (B0, E1, A1) causado por modulação de ciclo de onda
+      const limiter = ctx.createDynamicsCompressor();
+      limiter.threshold.setValueAtTime(-1.5, ctx.currentTime);
+      limiter.knee.setValueAtTime(6, ctx.currentTime);
+      limiter.ratio.setValueAtTime(10, ctx.currentTime);
+      limiter.attack.setValueAtTime(0.005, ctx.currentTime);
+      limiter.release.setValueAtTime(0.15, ctx.currentTime);
+      limiter.connect(ctx.destination);
+      masterLimiterRef.current = limiter;
+
+      const bus = ctx.createGain();
+      bus.gain.value = 0.90;
+      bus.connect(limiter);
+      masterBusRef.current = bus;
+    }
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+    if (!masterBusRef.current || !masterLimiterRef.current) {
+      const limiter = ctx.createDynamicsCompressor();
+      limiter.threshold.setValueAtTime(-1.5, ctx.currentTime);
+      limiter.knee.setValueAtTime(6, ctx.currentTime);
+      limiter.ratio.setValueAtTime(10, ctx.currentTime);
+      limiter.attack.setValueAtTime(0.005, ctx.currentTime);
+      limiter.release.setValueAtTime(0.15, ctx.currentTime);
+      limiter.connect(ctx.destination);
+      masterLimiterRef.current = limiter;
+
+      const bus = ctx.createGain();
+      bus.gain.value = 0.90;
+      bus.connect(limiter);
+      masterBusRef.current = bus;
+    }
+    return { ctx, bus: masterBusRef.current };
+  };
+
+  // Interrompe a voz ativa garantindo silêncio absoluto antes que qualquer nova voz comece
   const stopSynthesizer = (smooth = true) => {
-    if (stopTimerRef.current) {
-      clearTimeout(stopTimerRef.current);
-      stopTimerRef.current = null;
+    const voice = currentVoiceRef.current;
+    if (voice?.timeoutId) {
+      clearTimeout(voice.timeoutId);
     }
 
-    if (smooth && masterGainRef.current && audioContextRef.current) {
+    if (voice && audioContextRef.current && audioContextRef.current.state === 'running') {
       try {
         const ctx = audioContextRef.current;
         const now = ctx.currentTime;
-        masterGainRef.current.gain.cancelScheduledValues(now);
-        masterGainRef.current.gain.setValueAtTime(masterGainRef.current.gain.value, now);
-        masterGainRef.current.gain.linearRampToValueAtTime(0.0001, now + 0.04);
+        const { osc, gain, filter } = voice;
 
-        const oscs = [...activeOscillatorsRef.current];
+        // Cancela toda automação pendente e captura o valor atual do gain
+        gain.gain.cancelScheduledValues(now);
+        const currentGain = Math.max(0.00001, gain.gain.value);
+        gain.gain.setValueAtTime(currentGain, now);
+
+        if (smooth) {
+          // Fade linear rápido até zero em 15ms — imperceptível ao ouvido mas garante silêncio total
+          gain.gain.linearRampToValueAtTime(0, now + 0.015);
+          osc.stop(now + 0.018);
+        } else {
+          gain.gain.setValueAtTime(0, now);
+          osc.stop(now + 0.003);
+        }
+
+        // Desconecta os nós do grafo apenas após o oscilador ter parado completamente
         setTimeout(() => {
-          oscs.forEach(osc => {
-            try {
-              osc.stop();
-              osc.disconnect();
-            } catch (e) {}
-          });
-        }, 50);
+          try { osc.disconnect(); } catch (e) {}
+          try { filter?.disconnect(); } catch (e) {}
+          try { gain.disconnect(); } catch (e) {}
+        }, 40);
+
       } catch (e) {
-        activeOscillatorsRef.current.forEach(osc => {
-          try {
-            osc.stop();
-            osc.disconnect();
-          } catch (err) {}
-        });
+        try { voice.osc.stop(); } catch (err) {}
       }
-    } else {
-      activeOscillatorsRef.current.forEach(osc => {
-        try {
-          osc.stop();
-          osc.disconnect();
-        } catch (e) {}
-      });
+    } else if (voice) {
+      try { voice.osc.stop(); } catch (e) {}
     }
 
-    activeOscillatorsRef.current = [];
-    masterGainRef.current = null;
+    currentVoiceRef.current = null;
     setPlayingStringIndex(null);
   };
 
@@ -95,26 +145,23 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
   const toggleContinuousSound = () => {
     setIsContinuousSound(prev => {
       const next = !prev;
+      const voice = currentVoiceRef.current;
       if (next) {
-        // Se ativou o contínuo e está tocando, cancela o timer de 5s para que não pare sozinho
-        if (stopTimerRef.current) {
-          clearTimeout(stopTimerRef.current);
-          stopTimerRef.current = null;
+        if (voice?.timeoutId) {
+          clearTimeout(voice.timeoutId);
+          voice.timeoutId = null;
         }
       } else {
-        // Se desativou o contínuo e está tocando, programa a parada para 4s a partir de agora (3s estável + 1s fade-out)
         if (playingStringIndex !== null) {
-          if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
-          stopTimerRef.current = setTimeout(() => {
-            stopSynthesizer(true);
-          }, 4000);
+          if (voice?.timeoutId) clearTimeout(voice.timeoutId);
+          stopSynthesizer(true);
         }
       }
       return next;
     });
   };
 
-  // Reproduz notas de referência com som límpido, sem estourar em frequências acima de 140Hz
+  // Reproduz notas de referência com síntese acústica dedicada para Piano e Diapasão sem nenhum clique
   const playReferenceTone = async (frequency: number, index: number, overrideTimbre?: 'piano' | 'diapasao') => {
     // Se clicar na mesma corda que já está tocando, silencia
     if (playingStringIndex === index && !overrideTimbre) {
@@ -122,135 +169,146 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
       return;
     }
 
-    stopSynthesizer(false);
+    // Interrompe qualquer nota anterior de forma limpa antes de soar a nova
+    stopSynthesizer(true);
     setPlayingStringIndex(index);
 
     const activeTimbre = overrideTimbre || soundTimbre;
 
     try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      let ctx = audioContextRef.current;
-      if (!ctx || ctx.state === 'closed') {
-        ctx = new AudioContextClass();
-        audioContextRef.current = ctx;
-      }
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
-
+      const { ctx, bus } = await getOrCreateAudioEngine();
       const now = ctx.currentTime;
+      // 50ms de lookahead: voz anterior para em T+18ms, nova começa em T+50ms
+      // Garante 32ms de silêncio absoluto entre as duas vozes → sem interferência tonal
+      const startTime = now + 0.050;
 
-      // Compressor de dinâmica de proteção (Limiter) para impedir 100% qualquer distorção ou clipagem digital
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.setValueAtTime(-4, now);
-      compressor.knee.setValueAtTime(6, now);
-      compressor.ratio.setValueAtTime(8, now);
-      compressor.attack.setValueAtTime(0.003, now);
-      compressor.release.setValueAtTime(0.1, now);
-      compressor.connect(ctx.destination);
+      const osc = ctx.createOscillator();
+      const voiceGain = ctx.createGain();
 
-      const masterGain = ctx.createGain();
-      masterGainRef.current = masterGain;
-      masterGain.connect(compressor);
-
-      // Fator de compensação de graves calibrado com headroom amplo para NUNCA saturar acima de 140Hz
-      const bassFactor = frequency < 90 ? 1.2 : (frequency < 140 ? 1.08 : 1.0);
-      const targetMasterVolume = 0.38 * bassFactor;
-
-      // Ataque ultra suave de 25ms para evitar qualquer clique/pop de início
-      masterGain.gain.setValueAtTime(0.0001, now);
-      masterGain.gain.linearRampToValueAtTime(targetMasterVolume, now + 0.025);
-
+      // Volume balanceado: para graves profundos (< 65 Hz: B0, E1, A1), evitamos saturar a excursão mecânica do falante do celular
+      const bassBoost = frequency < 65 ? 0.90 : (frequency < 135 ? 1.04 : 1.0);
+      const targetVol = 0.30 * bassBoost;
       const isContinuous = isContinuousSound;
-      // Duração: 3 segundos no mesmo volume constante + 1 segundo de fade out suave = 4 segundos totais
-      const steadyDuration = 3.0;
-      const fadeDuration = 1.0;
-      const totalDuration = steadyDuration + fadeDuration;
-
-      if (!isContinuous) {
-        // Mantém EXATAMENTE o mesmo volume por 3 segundos
-        masterGain.gain.setValueAtTime(targetMasterVolume, now + steadyDuration);
-        // Fade out suave durante 1 segundo inteiro até silenciar
-        masterGain.gain.linearRampToValueAtTime(0.0001, now + totalDuration);
-
-        stopTimerRef.current = setTimeout(() => {
-          if (playingStringIndex === index) {
-            stopSynthesizer(true);
-          }
-        }, totalDuration * 1000);
-      }
-
-      const osc1 = ctx.createOscillator();
-      const osc2 = ctx.createOscillator();
-      const osc3 = ctx.createOscillator();
-      const osc4 = ctx.createOscillator();
-
-      const gain1 = ctx.createGain();
-      const gain2 = ctx.createGain();
-      const gain3 = ctx.createGain();
-      const gain4 = ctx.createGain();
-
-      const oscs: OscillatorNode[] = [osc1];
+      let filter: BiquadFilterNode | undefined = undefined;
+      let timeoutId: any = null;
 
       if (activeTimbre === 'diapasao') {
-        // TIMBRE DE DIAPASÃO: Onda senoidal pura de referência, cristalina e musical
-        osc1.type = 'sine';
-        osc1.frequency.setValueAtTime(frequency, now);
-        osc1.connect(gain1);
-        gain1.connect(masterGain);
-        gain1.gain.setValueAtTime(0.75, now);
+        // DIAPASÃO: Onda senoidal pura de altíssima fidelidade acústica
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(frequency, startTime);
+
+        // Conexão DIRETA: Oscilador -> Ganho da Voz -> Barramento Mestre (com Limiter)
+        // Sem filtro biquad no caminho do diapasão para evitar ruídos de coeficientes ou rotação de fase
+        voiceGain.gain.value = 0;
+        osc.connect(voiceGain);
+        voiceGain.connect(bus);
+
+        // Ataque linear contínuo a partir de ZERO absoluto em 60ms
+        // Elimina 100% o estouro transitório (pop) característico do exponentialRamp em ondas senoidais puras
+        voiceGain.gain.setValueAtTime(0, startTime);
+        voiceGain.gain.linearRampToValueAtTime(targetVol * 0.78, startTime + 0.060);
+
+        // Inicia oscilador precisamente em startTime
+        osc.start(startTime);
+
+        if (!isContinuous) {
+          // Decaimento natural e sedoso de diapasão de aço afinador
+          voiceGain.gain.exponentialRampToValueAtTime(targetVol * 0.40, startTime + 2.0);
+          voiceGain.gain.exponentialRampToValueAtTime(0.001, startTime + 3.8);
+          voiceGain.gain.linearRampToValueAtTime(0, startTime + 3.95);
+          osc.stop(startTime + 4.0);
+
+          timeoutId = setTimeout(() => {
+            setPlayingStringIndex(prev => prev === index ? null : prev);
+          }, 4050);
+        }
       } else {
-        // TIMBRE DE PIANO: Síntese aditiva natural com harmônicos controlados
-        oscs.push(osc2, osc3, osc4);
+        // TIMBRE ENCORPADO DE INSTRUMENTO ACÚSTICO / VIOLÃO / GUITARRA (PIANO):
+        // Síntese harmônica fidedigna da vibração da corda de aço/nylon + ressonância dinâmica de tampo de madeira
+        // Número de harmônicas ajustado dinamicamente para evitar aliasing acima de Nyquist (48 kHz → 24 kHz)
+        const maxHarmonics = Math.min(16, Math.floor(24000 / frequency));
+        const real = new Float32Array(maxHarmonics + 1);
+        const imag = new Float32Array(maxHarmonics + 1);
 
-        osc1.type = 'sine';
-        osc1.frequency.setValueAtTime(frequency, now);
-        osc1.connect(gain1);
-        gain1.connect(masterGain);
+        if (frequency < 70) {
+          // Para notas subgraves (B0 ≈ 31Hz, E1 ≈ 41Hz, A1 ≈ 55Hz), alto-falantes de celular
+          // distorcem fisicamente se a fundamental tiver amplitude excessiva.
+          // Aplicamos o princípio psicoacústico da "fundamental ausente":
+          // atenuamos a fundamental mecânica e enfatizamos os harmônicos superiores (oitava e quinta),
+          // resultando em um som encorpado, nítido e 100% livre de chiado ou raspagem:
+          if (maxHarmonics >= 1) imag[1] = 0.55;  // Fundamental controlada contra saturação
+          if (maxHarmonics >= 2) imag[2] = 0.85;  // 1ª Oitava encorpada e nítida no alto-falante
+          if (maxHarmonics >= 3) imag[3] = 0.50;  // 5ª Justa (definição e calor tonal)
+          if (maxHarmonics >= 4) imag[4] = 0.25;  // 2ª Oitava
+          if (maxHarmonics >= 5) imag[5] = 0.10;  // 3ª Maior
+          if (maxHarmonics >= 6) imag[6] = 0.04;  // Harmônicos superiores suaves
+          if (maxHarmonics >= 7) imag[7] = 0.015;
+          if (maxHarmonics >= 8) imag[8] = 0.005;
+        } else {
+          // Preenchimento padrão para notas médias e agudas
+          if (maxHarmonics >= 1) imag[1] = 1.0;   // Fundamental
+          if (maxHarmonics >= 2) imag[2] = 0.52;  // 1ª Oitava
+          if (maxHarmonics >= 3) imag[3] = 0.28;  // 5ª Justa
+          if (maxHarmonics >= 4) imag[4] = 0.14;  // 2ª Oitava
+          if (maxHarmonics >= 5) imag[5] = 0.07;  // 3ª Maior
+          if (maxHarmonics >= 6) imag[6] = 0.035; // Ressonância da madeira
+          if (maxHarmonics >= 7) imag[7] = 0.018; // Ataque suave
+          if (maxHarmonics >= 8) imag[8] = 0.008; // Ar e ambiência
+        }
 
-        osc2.type = 'sine';
-        osc2.frequency.setValueAtTime(frequency * 2.0006, now); // 2º harmônico (oitava sutil)
-        osc2.connect(gain2);
-        gain2.connect(masterGain);
+        const customWave = ctx.createPeriodicWave(real, imag, { disableNormalization: false });
+        osc.setPeriodicWave(customWave);
+        osc.frequency.setValueAtTime(frequency, startTime);
 
-        osc3.type = 'sine';
-        osc3.frequency.setValueAtTime(frequency * 3.0012, now); // 3º harmônico (quinta sutil)
-        osc3.connect(gain3);
-        gain3.connect(masterGain);
+        filter = ctx.createBiquadFilter();
+        // Cadeia acústica: Oscilador -> Filtro Dinâmico -> Ganho da Voz -> Barramento
+        osc.connect(filter);
+        filter.connect(voiceGain);
+        voiceGain.connect(bus);
 
-        osc4.type = 'sine';
-        osc4.frequency.setValueAtTime(frequency * 4.0018, now); // Transiente de ataque de martelo
-        osc4.connect(gain4);
-        gain4.connect(masterGain);
+        // Filtro acústico com Q musical suave (0.75): sem picos de ressonância agressivos que chiem no celular
+        filter.type = 'lowpass';
+        filter.Q.value = 0.75;
+        const initialCutoff = Math.min(3600, Math.max(700, frequency * 5.0));
+        const warmCutoff = Math.min(1600, Math.max(350, frequency * 2.0));
 
-        // Calibração harmônica: notas agudas (>= 140Hz) com harmônicos reduzidos para som encorpado e aveludado
-        const isHighFreq = frequency >= 140;
-        const v1 = isHighFreq ? 0.62 : 0.54;
-        const v2 = isHighFreq ? 0.16 : 0.24;
-        const v3 = isHighFreq ? 0.04 : 0.08;
-        const v4 = 0.05; // Martelo inicial percussivo
+        filter.frequency.setValueAtTime(initialCutoff, startTime);
+        filter.frequency.exponentialRampToValueAtTime(warmCutoff, startTime + 0.35);
 
-        gain1.gain.setValueAtTime(v1, now);
-        gain2.gain.setValueAtTime(v2, now);
-        gain3.gain.setValueAtTime(v3, now);
+        // Ataque orgânico exponencial de 40ms (livre de descontinuidade)
+        voiceGain.gain.value = 0.00001;
+        voiceGain.gain.setValueAtTime(0.00001, startTime);
+        voiceGain.gain.exponentialRampToValueAtTime(targetVol, startTime + 0.040);
 
-        // Transiente de martelo suave que decai naturalmente nos primeiros 60ms
-        gain4.gain.setValueAtTime(v4, now);
-        gain4.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
+        // Inicia oscilador no relógio DSP
+        osc.start(startTime);
+
+        if (!isContinuous) {
+          // Sustentação acústica natural com leve decaimento como numa corda real
+          voiceGain.gain.exponentialRampToValueAtTime(targetVol * 0.72, startTime + 1.8);
+          // Fade musical progressivo até o limiar de silêncio
+          voiceGain.gain.exponentialRampToValueAtTime(0.0001, startTime + 3.8);
+          // Rampa linear contínua para zero absoluto antes do corte do oscilador
+          voiceGain.gain.linearRampToValueAtTime(0, startTime + 3.9);
+          osc.stop(startTime + 3.95);
+
+          timeoutId = setTimeout(() => {
+            setPlayingStringIndex(prev => prev === index ? null : prev);
+          }, 4020);
+        }
       }
 
-      oscs.forEach(osc => {
-        osc.start(now);
-        if (!isContinuous) {
-          osc.stop(now + totalDuration + 0.05);
-        }
-      });
-
-      activeOscillatorsRef.current = oscs;
+      currentVoiceRef.current = {
+        osc,
+        gain: voiceGain,
+        filter,
+        timeoutId,
+      };
     } catch (e) {
-      console.error("Erro ao iniciar áudio de referência:", e);
+      console.error("Erro ao reproduzir áudio de referência:", e);
     }
   };
+
 
   // Pitch detection algorithm: Autocorrelation with noise filtering
   const performPitchDetection = () => {
@@ -393,8 +451,17 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
+      if (micSourceRef.current) {
+        try { micSourceRef.current.disconnect(); } catch (e) {}
+        micSourceRef.current = null;
+      }
+      if (analyserRef.current) {
+        try { analyserRef.current.disconnect(); } catch (e) {}
+        analyserRef.current = null;
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
       }
       setDetectedFreq(null);
       setDetectedNote('--');
@@ -421,11 +488,10 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
 
         streamRef.current = stream;
         
-        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        const ctx = new AudioContextClass();
-        audioContextRef.current = ctx;
+        const { ctx } = await getOrCreateAudioEngine();
 
         const source = ctx.createMediaStreamSource(stream);
+        micSourceRef.current = source;
         const analyser = ctx.createAnalyser();
         // Set FFT size for high pitch resolution (1024 / 2048 / 4096)
         analyser.fftSize = 2048;
@@ -456,12 +522,51 @@ export default function Tuner({ theme = 'dark' }: { theme?: 'dark' | 'light' }) 
     };
   }, [isMicMode, selectedType, selectedTuningId]);
 
-  // Cleanup audio on unmount
+  // Monitora o ciclo de vida do app (segundo plano / retorno) para estabilizar o pipeline de áudio no Android
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === 'hidden') {
+        // App foi para segundo plano (ou tela bloqueada): silencia síntese e suspende AudioContext
+        stopSynthesizer(false);
+        if (audioContextRef.current && audioContextRef.current.state === 'running') {
+          try {
+            await audioContextRef.current.suspend();
+          } catch (e) {}
+        }
+      } else if (document.visibilityState === 'visible') {
+        // App retornou para primeiro plano: acorda o relógio DSP sem instabilidade
+        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+          try {
+            await audioContextRef.current.resume();
+          } catch (e) {}
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  // Cleanup áudio completo ao desmontar o componente
   useEffect(() => {
     return () => {
-      stopSynthesizer();
+      stopSynthesizer(false);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (micSourceRef.current) {
+        try { micSourceRef.current.disconnect(); } catch (e) {}
+        micSourceRef.current = null;
+      }
+      if (analyserRef.current) {
+        try { analyserRef.current.disconnect(); } catch (e) {}
+        analyserRef.current = null;
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
       }
     };
   }, []);

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Luthier de Bolso</string>
+    <string name="title_activity_main">Luthier de Bolso</string>
+    <string name="package_name">com.tupaaudio.luthierdebolso</string>
+    <string name="custom_url_scheme">com.tupaaudio.luthierdebolso</string>
+</resources>

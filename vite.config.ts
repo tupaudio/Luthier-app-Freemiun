@@ -13,8 +13,8 @@ export default defineConfig(() => {
       },
     },
     build: {
-      target: ['es2015', 'chrome60'],
-      cssTarget: ['chrome60'],
+      target: ['es2020', 'chrome80'],
+      cssTarget: ['chrome80'],
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
