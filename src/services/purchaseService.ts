@@ -1,8 +1,8 @@
 import { Capacitor } from '@capacitor/core';
 import { Purchases, type PurchasesPackage } from '@revenuecat/purchases-capacitor';
 
-// Chave pública da API RevenueCat para Google Play (configurável no .env via VITE_REVENUECAT_GOOGLE_KEY)
-const REVENUECAT_GOOGLE_KEY = ((import.meta as any).env?.VITE_REVENUECAT_GOOGLE_KEY as string) || 'goog_luthier_bolso_public_key';
+// Chave pública da API RevenueCat para Google Play
+const REVENUECAT_GOOGLE_KEY = ((import.meta as any).env?.VITE_REVENUECAT_GOOGLE_KEY as string) || 'goog_CRNtIOUfrDKdOvSyEuEZbdTsGAB';
 
 let isInitialized = false;
 
